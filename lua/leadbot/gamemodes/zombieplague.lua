@@ -44,6 +44,83 @@ local function addSpots()
     HidingSpots = spotsReset
 end
 
+function LeadBot.StartCommand(bot, cmd)
+    local buttons = IN_SPEED
+    local botWeapon = bot:GetActiveWeapon()
+    local controller = bot.ControllerBot
+    local target = controller.Target
+
+    if !IsValid(controller) then return end
+
+    if bot:IsHuman() then
+        buttons = 0
+    end
+
+    if IsValid(botWeapon) and (botWeapon:Clip1() == 0 or !IsValid(target) and botWeapon:Clip1() <= botWeapon:GetMaxClip1() / 2) then
+        buttons = buttons + IN_RELOAD
+    end
+
+    if IsValid(target) and target:GetPos():DistToSqr(bot:GetPos()) < 5000 then
+        buttons = buttons + IN_ATTACK
+    end
+
+    if bot:GetMoveType() == MOVETYPE_LADDER then
+        local pos = controller.goalPos
+        local ang = ((pos + bot:GetCurrentViewOffset()) - bot:GetShootPos()):Angle()
+
+        if pos.z > controller:GetPos().z then
+            controller.LookAt = Angle(-30, ang.y, 0)
+        else
+            controller.LookAt = Angle(30, ang.y, 0)
+        end
+
+        controller.LookAtTime = CurTime() + 0.1
+        controller.NextJump = -1
+        buttons = buttons + IN_FORWARD
+    end
+
+    if controller.NextDuck > CurTime() then
+        buttons = buttons + IN_DUCK
+    elseif controller.NextJump == 0 then
+        controller.NextJump = CurTime() + 1
+        buttons = buttons + IN_JUMP
+    end
+
+    if !bot:IsOnGround() and controller.NextJump > CurTime() then
+        buttons = buttons + IN_DUCK
+    end
+
+    bot:SelectWeapon((IsValid(controller.Target) and controller.Target:GetPos():DistToSqr(controller:GetPos()) < 129000 and "weapon_shotgun") or "weapon_smg1")
+    cmd:ClearButtons()
+    cmd:ClearMovement()
+    cmd:SetButtons(buttons)
+end
+
+-- local function findNearest(bot, radius, filter)
+--     local pos = bot:EyePos()
+
+-- 	local plys = {}
+-- 	for num, ply in ipairs((radius == nil) and player_GetAll() or ents_FindInSphere(pos, radius)) do
+-- 		if IsValid(ply) and ply:IsPlayer() and (!filter or !isfunction(filter) or filter(ply)) then
+-- 			table_insert(plys, {pos:Distance(ply:GetPos()), ply})
+-- 		end
+-- 	end
+	
+-- 	local output = nil
+-- 	for _, tbl in ipairs(plys) do
+-- 		if !output or (tbl[1] < output[1]) then
+-- 			output = tbl
+-- 		end
+-- 	end
+
+--     local ret = nil
+--     for _, tbl in ipairs(output) do
+--         if tbl[2]:is
+--     end
+
+-- 	return ret
+-- end
+
 function LeadBot.PlayerMove(bot, cmd, mv)
     if #HidingSpots < 1 then
         addSpots()
@@ -79,11 +156,34 @@ function LeadBot.PlayerMove(bot, cmd, mv)
     end
 
     if !IsValid(controller.Target) then
-        for _, ply in ipairs(player.GetAll()) do
-            if ply ~= bot and ply:Team() ~= bot:Team() and ply:Alive() and ply:GetPos():DistToSqr(bot:GetPos()) < 2250000 and controller:CanSee(ply) then
-                controller.Target = ply
-                controller.ForgetTarget = CurTime() + 2
+        local tbl = player.findNearest(bot:EyePos(), bot:IsZombie() and nil or 512, function(ply)
+            if (ply == bot) or (ply:Team() == bot:Team()) or !ply:Alive() then return false end
+
+            if bot:IsHuman() and !controller:CanSee(ply) then
+                return false
             end
+
+            local tr = util.TraceLine({
+                start = bot:LocalToWorld(bot:OBBMaxs()),
+                endpos = ply:LocalToWorld(ply:OBBCenter()),
+                endpos = function()
+                    
+                end,
+            })
+
+            -- ply:SetPos(tr["HitPos"])
+
+            -- debugoverlay.Cross(tr["HitPos"], 5)
+
+            print(tr["Entity"] == ply)
+
+            return true
+        end)
+
+        if istable(tbl) and IsValid(tbl[2]) then
+            -- print(tbl[2])
+            controller.Target = tbl[2]
+            controller.ForgetTarget = CurTime() + 2
         end
     elseif controller.ForgetTarget < CurTime() and controller:CanSee(controller.Target) then
         controller.ForgetTarget = CurTime() + 2
@@ -91,8 +191,37 @@ function LeadBot.PlayerMove(bot, cmd, mv)
 
     local dt = util.QuickTrace(bot:EyePos(), bot:GetForward() * 45, bot)
 
-    if IsValid(dt.Entity) and dt.Entity:GetClass() == "prop_door_rotating" then
-        dt.Entity:Fire("OpenAwayFrom", bot, 0)
+    if (bot.doorsDelay or 0) < CurTime() then
+        local door = dt.Entity
+        if IsValid(door) and (door:GetClass() == "prop_door_rotating") then
+            door:SetKeyValue("opendir", 2)
+            bot:Freeze(true)
+
+            timer.Simple(1, function()
+                if IsValid(door) and IsValid(bot) then
+                    if bot:IsZombie() then
+                        door:Fire("Unlock")
+                    end
+
+                    door:Fire("Open")
+                    
+                    timer.Simple(1, function()
+                        if IsValid(bot) then
+                            bot:Freeze(false)
+                        end
+                    end)
+                end
+            end)
+
+            -- bot:Freeze(true)
+            -- timer.Simple(1, function()
+            --     if IsValid(bot) then
+            --         bot:Freeze(false)
+            --     end
+            -- end)
+        end
+
+        bot.doorsDelay = CurTime() + 1
     end
 
     if bot:Team() ~= TEAM_HUMANS and bot.hidingspot then
@@ -148,9 +277,9 @@ function LeadBot.PlayerMove(bot, cmd, mv)
         -- back up if the target is really close
         -- TODO: find a random spot rather than trying to back up into what could just be a wall
         -- something like controller.PosGen = controller:FindSpot("random", {pos = bot:GetPos() - bot:GetForward() * 350, radius = 1000})?
-        if bot:Team() ~= TEAM_ZOMBIES and distance <= 160000 then
-            mv:SetForwardSpeed(-1200)
-        end
+        -- if bot:Team() != TEAM_ZOMBIES and distance <= 160000 then
+        --     mv:SetForwardSpeed(-1200)
+        -- end
     end
 
     -- movement also has a similar issue, but it's more severe...
@@ -197,13 +326,14 @@ function LeadBot.PlayerMove(bot, cmd, mv)
             end
         end
 
+        local runSpeed = bot:GetRunSpeed()
         if controller.NextCenter > CurTime() then
             if controller.strafeAngle == 1 then
-                mv:SetSideSpeed(1500)
+                mv:SetSideSpeed(runSpeed)
             elseif controller.strafeAngle == 2 then
-                mv:SetSideSpeed(-1500)
+                mv:SetSideSpeed(-runSpeed)
             else
-                mv:SetForwardSpeed(-1500)
+                mv:SetForwardSpeed(-runSpeed)
             end
         end
 
